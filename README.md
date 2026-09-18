@@ -17,6 +17,7 @@ compositor, lock screens and TTYs alike.
 | `server.py` | the relay (e.g. a DigitalOcean droplet) | `cryptography` |
 | `receiver.py` | the Arch/SteamOS machine being typed into | `cryptography`, write access to `/dev/uinput` |
 | `provider.py` | Windows / Linux, the machine you type on | `cryptography`, Tk |
+| `gateway.py` | a Docker host on your tailnet (e.g. a NAS) — optional web keyboard for phones | `cryptography`, `aiohttp` |
 | `kbrelay_common.py` | everywhere (copy it next to the script) | |
 | `kbrelay-receiver.sh`, `kbrelay-provider.sh` | optional self-contained launchers | nothing: they fetch Python via uv into `$HOME` |
 
@@ -264,6 +265,65 @@ Then create the key and `config.json` as in step 2 (`ssh-keygen` is included in 
 Click a receiver in the list, and everything typed while the green area has focus goes to it.
 Switching windows, clicking the list or pressing **Stop sending** releases all held keys on the
 receiver. It reconnects automatically and re-attaches to the receiver you last picked.
+
+---
+
+## 5. Web gateway (type from a phone), optional
+
+For a phone or tablet there's no native app; instead run `gateway.py` — a headless provider with a
+password-protected web keyboard — on an always-on Docker host that's on your tailnet, such as a
+Synology NAS. Your phone opens a web page over Tailscale and types into any receiver.
+
+**How it fits the trust model.** The gateway holds its own provider key and does the encryption in
+Python, so unlike the relay it *can* see what's typed through it — it's a trusted node. Keep it off
+the public internet (reach it only over Tailscale, plus the login), give it a key you can revoke, and
+don't run it on the relay droplet. The relay stays trustless and unchanged; the gateway is just one
+more provider as far as it's concerned.
+
+### Keys
+
+```bash
+# on any machine, make the gateway's key and copy the .pub to the relay
+ssh-keygen -t ed25519 -C gateway -f ./config/id_ed25519
+#   -> add ./config/id_ed25519.pub to the relay's  /etc/kbrelay/providers/gateway.pub
+#   -> add it to each receiver's  ~/.config/kbrelay/providers/gateway.pub  (so they accept it)
+
+# tell the gateway which receivers to trust (strict, no prompts on a headless box)
+mkdir -p ./config/receivers
+cp /path/to/each/receiver/id_ed25519.pub ./config/receivers/<receiver-name>.pub
+```
+
+### Run it (Docker)
+
+Edit `docker-compose.yml` (relay address, fingerprint, and a password), then:
+
+```bash
+docker compose run --rm kbrelay-gateway hash-password   # prints a GATEWAY_PASSWORD_HASH to paste in
+docker compose up -d
+docker compose logs -f
+```
+
+`./config` is mounted read-only into the container. Pick any free NAS port with the `ports:` mapping.
+Configuration is all environment variables: `KBRELAY_SERVER`, `KBRELAY_FINGERPRINT`, `KBRELAY_KEY`,
+`KBRELAY_PEERS`, `KBRELAY_NAME`, optional `KBRELAY_PROXY`, and `GATEWAY_PORT`,
+`GATEWAY_PASSWORD_HASH` (or `GATEWAY_PASSWORD`), `GATEWAY_SECRET` (set a long random hex so logins
+survive restarts), `GATEWAY_SESSION_HOURS`, `GATEWAY_COOKIE_SECURE`.
+
+### Reach it from your phone over Tailscale only
+
+The gateway has a login, but it should never be on the public internet. Two ways:
+
+- **`tailscale serve` (recommended)** — gives it an HTTPS `*.ts.net` name with a real cert (no browser
+  warnings) reachable only from your tailnet. On the NAS, point it at the published port:
+  `tailscale serve --bg https / http://127.0.0.1:8384`. Do **not** use `tailscale funnel`, which is public.
+- **Bind the published port to the tailscale address**, e.g. map `ports: ["100.x.y.z:8384:8384"]` to the
+  NAS's tailnet IP so it isn't offered on your LAN or WAN. This is plain http, so set
+  `GATEWAY_COOKIE_SECURE: "false"`.
+
+Then browse to the gateway, log in, pick a receiver, and type. A hardware keyboard paired to the phone
+sends real keys; the on-screen keyboard sends characters as text, with buttons for Esc/Tab/Enter/arrows
+and sticky Ctrl/Alt/Shift/Super. Because the gateway is a keyboard into your machines, also restrict it
+with a Tailscale ACL so only your phone can reach that port.
 
 ---
 

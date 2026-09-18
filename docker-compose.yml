@@ -1,0 +1,41 @@
+# kbrelay web gateway for Synology (or any Docker host on your tailnet).
+#
+# 1. Put the gateway's private key and each receiver's public key in ./config:
+#       ./config/id_ed25519            the gateway's provider key (chmod 600)
+#       ./config/receivers/<name>.pub  one per receiver you want to type into
+#    Add ./config/id_ed25519.pub to the relay's providers/ folder, and add this gateway's
+#    .pub to each receiver's ~/.config/kbrelay/providers/ so the receivers accept it.
+#
+# 2. Set a password hash (recommended) or plain password below, then:
+#       docker compose up -d
+#
+# 3. Expose it to your phone over Tailscale only (see the README): either publish the port
+#    just on the NAS's tailscale address, or run `tailscale serve` in front of 127.0.0.1:8384.
+
+services:
+  kbrelay-gateway:
+    build: .
+    # image: kbrelay-gateway            # if you built/pushed an image instead of building here
+    container_name: kbrelay-gateway
+    restart: unless-stopped
+    ports:
+      - "8384:8384"                      # change the left side to any free NAS port you like
+    volumes:
+      - ./config:/config:ro             # key + receivers/*.pub (read-only)
+    environment:
+      KBRELAY_SERVER: "203.0.113.10:443"          # your relay's IP/host:port
+      KBRELAY_FINGERPRINT: "SHA256:REPLACE_ME"    # from `server.py fingerprint`
+      KBRELAY_KEY: "/config/id_ed25519"
+      KBRELAY_PEERS: "/config/receivers"
+      KBRELAY_NAME: "gateway"                      # display name in the receiver list
+      # KBRELAY_PROXY: "http://user:pass@proxy:8080"   # only if the NAS needs a proxy to reach the relay
+
+      GATEWAY_PORT: "8384"
+      # Set ONE of these. Generate a hash with:  docker compose run --rm kbrelay-gateway hash-password
+      GATEWAY_PASSWORD_HASH: "REPLACE_WITH_HASH"
+      # GATEWAY_PASSWORD: "choose-a-strong-password"
+      GATEWAY_SECRET: "REPLACE_WITH_LONG_RANDOM_HEX"   # keeps logins valid across restarts
+      GATEWAY_SESSION_HOURS: "12"
+      # Set to "false" only if you reach it over plain http (not recommended); with tailscale serve
+      # it's https, so leave it true.
+      GATEWAY_COOKIE_SECURE: "true"
