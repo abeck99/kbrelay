@@ -32,6 +32,15 @@ log = logging.getLogger("kbrelay")
 RELEASE_DELAY_MS = 30  # X11 sends release+press pairs for auto-repeat; wait this long before trusting a release
 ALT_KEYS = {KEY["LEFTALT"], KEY["RIGHTALT"]}
 
+# Windows/Tk sometimes reports a modifier's *release* under the opposite left/right variant from its
+# press (e.g. press LEFTSHIFT, release arrives as RIGHTSHIFT). Map each modifier to its sibling so a
+# release can be matched to whichever variant is actually held, instead of being dropped.
+MODIFIER_SIBLING = {}
+for _l, _r in [("LEFTSHIFT", "RIGHTSHIFT"), ("LEFTCTRL", "RIGHTCTRL"),
+               ("LEFTALT", "RIGHTALT"), ("LEFTMETA", "RIGHTMETA")]:
+    MODIFIER_SIBLING[KEY[_l]] = KEY[_r]
+    MODIFIER_SIBLING[KEY[_r]] = KEY[_l]
+
 # ============================================================== key mapping
 
 _KEYSYM = {
@@ -124,9 +133,9 @@ def event_to_code(event, windowing: str) -> int | None:
 class NetClient(threading.Thread):
     """Runs the asyncio connection; talks to the GUI through a thread-safe queue."""
 
-    def __init__(self, server: str, fingerprint: str, key, proxy=None):
+    def __init__(self, server: str, fingerprint: str, key, proxy=None, name=None):
         super().__init__(daemon=True)
-        self.server, self.fingerprint, self.key, self.proxy = server, fingerprint, key, proxy
+        self.server, self.fingerprint, self.key, self.proxy, self.name = server, fingerprint, key, proxy, name
         self.events: queue.Queue = queue.Queue()
         self.loop = asyncio.new_event_loop()
         self.conn = None
@@ -151,7 +160,7 @@ class NetClient(threading.Thread):
             self.events.put(("status", f"Connecting to {self.server}…"))
             try:
                 conn, name = await connect_and_auth(self.server, self.fingerprint, self.key, "provider",
-                                                    proxy=self.proxy)
+                                                    proxy=self.proxy, name=self.name)
             except AuthError as exc:
                 delay = 30
                 self.events.put(("disconnected", f"{exc}. Retrying in {delay}s."))
@@ -453,22 +462,32 @@ class ProviderApp:
             self.send_key(code, True)
         return "break"  # stop Tk's own bindings (Tab focus traversal, Alt menu, etc.)
 
+    def held_variant(self, code: int) -> int | None:
+        """The actually-held key this release should lift: the code itself if it's down, else its
+        left/right modifier sibling if that's down (Windows can report the release under the other
+        variant), else None."""
+        if code in self.pressed:
+            return code
+        sibling = MODIFIER_SIBLING.get(code)
+        return sibling if sibling in self.pressed else None
+
     def on_key_up(self, event):
         code = event_to_code(event, self.windowing)
         if code is None:
             return "break"
         self.flush_releases(except_code=code)
-        if code not in self.pressed:
+        held = self.held_variant(code)
+        if held is None:
             if code == KEY["SYSRQ"]:  # Windows only reports PrintScreen on release
                 self.send_key(code, True)
                 self.send_key(code, False)
             return "break"
         if self.windowing == "x11":
-            if code not in self.pending_release:
-                after_id = self.root.after(RELEASE_DELAY_MS, self._commit_release, code)
-                self.pending_release[code] = (after_id, event.time)
+            if held not in self.pending_release:
+                after_id = self.root.after(RELEASE_DELAY_MS, self._commit_release, held)
+                self.pending_release[held] = (after_id, event.time)
         else:
-            self._commit_release(code)
+            self._commit_release(held)
         return "break"
 
     def _commit_release(self, code: int):
@@ -516,7 +535,8 @@ def main():
         root.destroy()
         return 1
 
-    net = NetClient(settings["server"], settings["fingerprint"], key, proxy=settings["proxy"])
+    net = NetClient(settings["server"], settings["fingerprint"], key,
+                    proxy=settings["proxy"], name=settings["name"])
     net.start()
     ProviderApp(root, net, root.tk.call("tk", "windowingsystem"), key, settings["peers"])
     root.deiconify()

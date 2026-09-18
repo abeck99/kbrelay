@@ -135,6 +135,20 @@ The `"server"` value can be a bare IP, `host:port`, or a URL — `203.0.113.10:7
 `relay.example.com:7433` and `kbrelay://203.0.113.10:7433` all work — so you can move the relay to a
 new IP or give it a DNS name later by editing this one line. The port defaults to 7433 if omitted.
 
+**Display name.** By default a receiver shows up in the provider's list under the name of its `.pub`
+file on the server. If several devices share a machine name, or you'd rather set the label on the
+device itself, add `"name"` to that device's config (or pass `--name`):
+
+```json
+{ "server": "…", "fingerprint": "…", "key": "…", "name": "living-room-deck" }
+```
+
+Names allow letters, digits, `.`, `_` and `-`. This only changes the label — the device is still
+authorized by its key (its `.pub` must be on the server), and the provider still pins receivers by
+key, so a name can't be used to impersonate another device. Keep names unique across your receivers;
+two live receivers with the same name will fight over the slot (each kicks the other off). The same
+option works for a provider if you want to relabel it too.
+
 **Behind a proxy (e.g. a Windows work machine).** If the provider can't reach the relay directly, add
 an HTTP CONNECT proxy. It can go in the config or, if you'd rather not store the password in a file,
 in the `HTTPS_PROXY` environment variable, or on the command line with `--proxy`:
@@ -260,6 +274,10 @@ receiver. It reconnects automatically and re-attaches to the receiver you last p
   (often Super and Alt+Tab). Alt+F4 is forwarded and doesn't close the provider window.
 - **Layout:** keys are physical positions, so set the receiver's layout to match the keyboard you're
   typing on. On Windows, AltGr arrives as Ctrl+Right Alt (that's how Windows reports it).
+- **Stuck modifiers:** if a Shift/Ctrl/Alt/Meta ever seems held on the receiver (e.g. everything types
+  as capitals), clicking off the green area and back releases all held keys. The provider already
+  matches a modifier's release to whichever left/right variant is actually held, which is the usual
+  cause on Windows, so this should be rare.
 - **`text` messages** (for on-screen keyboards) type ASCII assuming a US layout on the receiver;
   other characters use `wtype` (Wayland) or `xdotool` (X11) if installed (SteamOS has neither).
 - **The relay can't read keystrokes.** Provider↔receiver traffic is end-to-end encrypted, so a
@@ -276,6 +294,8 @@ Newline-delimited JSON over TLS 1.2+. The client pins the server certificate's S
 same TLS session through that tunnel; nothing else changes.)
 
 1. client → `{"type":"hello","protocol":"kbrelay-1","role":"provider"|"receiver","pubkey":"ssh-ed25519 AAAA…"}`
+   (an optional `"name"` field overrides the display label; the server uses it only if it matches
+   `[A-Za-z0-9][A-Za-z0-9._-]{0,63}`, and authorization is always by key regardless)
 2. server → `{"type":"challenge","nonce":"<base64 32 bytes>"}`
 3. client signs `"kbrelay-1\nclient-auth\n<role>\n<server fingerprint>\n" + nonce` with ed25519 →
    `{"type":"auth","sig":"<base64>"}`

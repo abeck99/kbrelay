@@ -32,8 +32,8 @@ from cryptography.hazmat.primitives.asymmetric import ec
 from cryptography.x509.oid import NameOID
 
 from kbrelay_common import (
-    DEFAULT_PORT, MAX_E2E_BLOB, MAX_LINE, PROTOCOL, READ_TIMEOUT, Connection, auth_payload, b64e,
-    cert_fingerprint, describe, load_authorized, parse_public_key, raw_public_bytes, ssh_fingerprint,
+    DEFAULT_PORT, MAX_E2E_BLOB, MAX_LINE, NAME_RE, PROTOCOL, READ_TIMEOUT, Connection, auth_payload,
+    b64e, cert_fingerprint, describe, load_authorized, parse_public_key, raw_public_bytes, ssh_fingerprint,
 )
 
 log = logging.getLogger("kbrelay")
@@ -108,7 +108,16 @@ class Hub:
             await conn.send_now({"type": "error", "message": f"not authorized as {role}"})
             return None
 
-        log.info("%s %r connected from %s", role, name, addr)
+        # Authorization is by key (the .pub file must exist); the display name defaults to that
+        # file's name but the client may override it with a valid name in its hello. This only
+        # changes the label — providers still pin receivers by key, so the name can't be used to
+        # impersonate another receiver.
+        authorized_name = name
+        requested = hello.get("name")
+        if isinstance(requested, str) and NAME_RE.match(requested):
+            name = requested
+        note = "" if name == authorized_name else f" (key authorized as {authorized_name!r})"
+        log.info("%s %r connected from %s [%s]%s", role, name, addr, ssh_fingerprint(pub), note)
         conn.send({"type": "welcome", "name": name, "role": role})
         return Peer(conn, role, name, raw, addr)
 

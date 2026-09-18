@@ -432,7 +432,8 @@ async def _open_tls(host: str, port: int, ssl_ctx: ssl.SSLContext, proxy: Proxy 
 
 
 async def connect_and_auth(server: str, fingerprint: str, key: Ed25519PrivateKey, role: str,
-                           timeout: float = 15, proxy: Proxy | None = None) -> tuple[Connection, str]:
+                           timeout: float = 15, proxy: Proxy | None = None,
+                           name: str | None = None) -> tuple[Connection, str]:
     host, port = split_host_port(server)
     reader, writer = await _open_tls(host, port, client_ssl_context(), proxy, timeout)
     conn = Connection(reader, writer)
@@ -441,8 +442,10 @@ async def connect_and_auth(server: str, fingerprint: str, key: Ed25519PrivateKey
         actual = cert_fingerprint(der)
         if not hmac.compare_digest(actual, normalize_fingerprint(fingerprint)):
             raise AuthError(f"server certificate fingerprint mismatch (server presented {actual})")
-        await conn.send_now({"type": "hello", "protocol": PROTOCOL, "role": role,
-                             "pubkey": openssh_public_line(key)})
+        hello = {"type": "hello", "protocol": PROTOCOL, "role": role, "pubkey": openssh_public_line(key)}
+        if name:
+            hello["name"] = name
+        await conn.send_now(hello)
         msg = await conn.recv(timeout)
         if msg.get("type") != "challenge":
             raise AuthError(msg.get("message") or "unexpected reply from server")
@@ -470,6 +473,8 @@ def add_client_args(parser) -> None:
                         "(default ~/.config/kbrelay/receivers for the provider, .../providers for the receiver)")
     parser.add_argument("--proxy", help="HTTP CONNECT proxy to tunnel through, "
                         "e.g. http://user:pass@proxy.corp:8080 (also read from config or the HTTPS_PROXY env var)")
+    parser.add_argument("--name", help="display name to register under, overriding the server-side "
+                        "key filename (letters, digits, . _ - ; useful when devices share a hostname)")
 
 
 def resolve_settings(args, role: str) -> dict:
@@ -483,12 +488,16 @@ def resolve_settings(args, role: str) -> dict:
     proxy_value = (args.proxy or config.get("proxy")
                    or os.environ.get("HTTPS_PROXY") or os.environ.get("https_proxy")
                    or os.environ.get("ALL_PROXY") or os.environ.get("all_proxy"))
+    name = args.name or config.get("name")
+    if name is not None and not NAME_RE.match(str(name)):
+        raise ValueError(f"invalid name {name!r}: use letters, digits, . _ - (max 64 chars)")
     settings = {
         "server": args.server or config.get("server"),
         "fingerprint": args.fingerprint or config.get("fingerprint"),
         "key": args.key or config.get("key") or str(DEFAULT_KEY),
         "peers": Path(args.peers or config.get("peers") or DEFAULT_PEERS[role]).expanduser(),
         "proxy": parse_proxy(proxy_value),
+        "name": str(name) if name is not None else None,
     }
     missing = [k for k in ("server", "fingerprint") if not settings[k]]
     if missing:

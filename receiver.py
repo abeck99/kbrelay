@@ -235,7 +235,7 @@ class Receiver:
         while True:
             try:
                 conn, name = await connect_and_auth(server, fingerprint, self.key, "receiver",
-                                                    proxy=self.settings["proxy"])
+                                                    proxy=self.settings["proxy"], name=self.settings["name"])
             except AuthError as exc:
                 log.error("%s (retrying in 60s)", exc)
                 delay = 60
