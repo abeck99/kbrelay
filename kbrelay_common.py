@@ -341,13 +341,46 @@ async def ping_loop(conn: Connection) -> None:
 
 def split_host_port(server: str) -> tuple[str, int]:
     server = server.strip()
-    if server.startswith("["):
+    if "://" in server:            # tolerate a URL-ish form like kbrelay://host:port or https://host:port/
+        server = server.split("://", 1)[1]
+    server = server.split("/", 1)[0].rstrip()   # drop any trailing path
+    if not server:
+        raise ValueError("empty server address")
+    if server.startswith("["):     # [ipv6]:port
         host, _, rest = server[1:].partition("]")
         return host, int(rest.lstrip(":") or DEFAULT_PORT)
-    if server.count(":") == 1:
+    if server.count(":") == 1:     # host:port or ipv4:port
         host, port = server.split(":")
         return host, int(port)
-    return server, DEFAULT_PORT
+    return server, DEFAULT_PORT     # bare host or IP (or a bracket-less IPv6, treated as host)
+
+
+class Proxy:
+    """An HTTP CONNECT proxy to tunnel the TLS connection through."""
+
+    def __init__(self, host: str, port: int, auth: str | None = None):
+        self.host, self.port, self.auth = host, port, auth
+
+    def __str__(self) -> str:
+        return f"{self.host}:{self.port}" + (" (with auth)" if self.auth else "")
+
+
+def parse_proxy(value) -> Proxy | None:
+    """Parse http://[user:pass@]host:port (scheme optional). Returns None for an empty value."""
+    if not value:
+        return None
+    from urllib.parse import unquote, urlsplit
+    text = value if "://" in value else "http://" + value
+    parts = urlsplit(text)
+    if parts.scheme not in ("http", "https"):
+        raise ValueError(f"only http proxies are supported, not {parts.scheme!r} "
+                         "(for a SOCKS or NTLM proxy, run a local forwarder such as cntlm and point kbrelay at that)")
+    if not parts.hostname:
+        raise ValueError(f"could not parse proxy address: {value!r}")
+    auth = None
+    if parts.username:
+        auth = b64e(f"{unquote(parts.username)}:{unquote(parts.password or '')}".encode())
+    return Proxy(parts.hostname, parts.port or 8080, auth)
 
 
 def client_ssl_context() -> ssl.SSLContext:
@@ -360,11 +393,48 @@ def client_ssl_context() -> ssl.SSLContext:
     return ctx
 
 
-async def connect_and_auth(server: str, fingerprint: str, key: Ed25519PrivateKey, role: str,
-                           timeout: float = 15) -> tuple[Connection, str]:
-    host, port = split_host_port(server)
+async def _open_tls(host: str, port: int, ssl_ctx: ssl.SSLContext, proxy: Proxy | None,
+                    timeout: float) -> tuple[asyncio.StreamReader, asyncio.StreamWriter]:
+    """Open a TLS stream to host:port, directly or by CONNECT-tunnelling through an HTTP proxy."""
+    if proxy is None:
+        return await asyncio.wait_for(
+            asyncio.open_connection(host, port, ssl=ssl_ctx, limit=MAX_LINE), timeout)
+
     reader, writer = await asyncio.wait_for(
-        asyncio.open_connection(host, port, ssl=client_ssl_context(), limit=MAX_LINE), timeout)
+        asyncio.open_connection(proxy.host, proxy.port, limit=MAX_LINE), timeout)
+    try:
+        lines = [f"CONNECT {host}:{port} HTTP/1.1", f"Host: {host}:{port}"]
+        if proxy.auth:
+            lines.append(f"Proxy-Authorization: Basic {proxy.auth}")
+        writer.write(("\r\n".join(lines) + "\r\n\r\n").encode("latin1"))
+        await writer.drain()
+
+        status = await asyncio.wait_for(reader.readline(), timeout)
+        if not status:
+            raise AuthError(f"proxy {proxy.host}:{proxy.port} closed the connection during CONNECT")
+        while True:  # consume the rest of the proxy's response headers
+            line = await asyncio.wait_for(reader.readline(), timeout)
+            if line in (b"\r\n", b"\n", b""):
+                break
+        fields = status.decode("latin1", "replace").split(None, 2)
+        code = fields[1] if len(fields) > 1 else ""
+        if code != "200":
+            hint = " — check the proxy username/password" if code == "407" else ""
+            raise AuthError(f"proxy refused to connect to {host}:{port}: "
+                            f"{status.decode('latin1', 'replace').strip()}{hint}")
+        if not hasattr(writer, "start_tls"):   # StreamWriter.start_tls needs Python 3.11+
+            raise AuthError("connecting through a proxy needs Python 3.11 or newer")
+        await asyncio.wait_for(writer.start_tls(ssl_ctx), timeout)
+        return reader, writer
+    except BaseException:
+        writer.close()
+        raise
+
+
+async def connect_and_auth(server: str, fingerprint: str, key: Ed25519PrivateKey, role: str,
+                           timeout: float = 15, proxy: Proxy | None = None) -> tuple[Connection, str]:
+    host, port = split_host_port(server)
+    reader, writer = await _open_tls(host, port, client_ssl_context(), proxy, timeout)
     conn = Connection(reader, writer)
     try:
         der = writer.get_extra_info("ssl_object").getpeercert(binary_form=True)
@@ -398,6 +468,8 @@ def add_client_args(parser) -> None:
     parser.add_argument("--key", help=f"ed25519 private key (default {DEFAULT_KEY})")
     parser.add_argument("--peers", help="directory of trusted peer .pub files "
                         "(default ~/.config/kbrelay/receivers for the provider, .../providers for the receiver)")
+    parser.add_argument("--proxy", help="HTTP CONNECT proxy to tunnel through, "
+                        "e.g. http://user:pass@proxy.corp:8080 (also read from config or the HTTPS_PROXY env var)")
 
 
 def resolve_settings(args, role: str) -> dict:
@@ -407,11 +479,16 @@ def resolve_settings(args, role: str) -> dict:
         config = json.loads(path.read_text())
     elif args.config:
         raise FileNotFoundError(f"config file not found: {path}")
+    import os
+    proxy_value = (args.proxy or config.get("proxy")
+                   or os.environ.get("HTTPS_PROXY") or os.environ.get("https_proxy")
+                   or os.environ.get("ALL_PROXY") or os.environ.get("all_proxy"))
     settings = {
         "server": args.server or config.get("server"),
         "fingerprint": args.fingerprint or config.get("fingerprint"),
         "key": args.key or config.get("key") or str(DEFAULT_KEY),
         "peers": Path(args.peers or config.get("peers") or DEFAULT_PEERS[role]).expanduser(),
+        "proxy": parse_proxy(proxy_value),
     }
     missing = [k for k in ("server", "fingerprint") if not settings[k]]
     if missing:

@@ -124,9 +124,9 @@ def event_to_code(event, windowing: str) -> int | None:
 class NetClient(threading.Thread):
     """Runs the asyncio connection; talks to the GUI through a thread-safe queue."""
 
-    def __init__(self, server: str, fingerprint: str, key):
+    def __init__(self, server: str, fingerprint: str, key, proxy=None):
         super().__init__(daemon=True)
-        self.server, self.fingerprint, self.key = server, fingerprint, key
+        self.server, self.fingerprint, self.key, self.proxy = server, fingerprint, key, proxy
         self.events: queue.Queue = queue.Queue()
         self.loop = asyncio.new_event_loop()
         self.conn = None
@@ -150,7 +150,8 @@ class NetClient(threading.Thread):
         while True:
             self.events.put(("status", f"Connecting to {self.server}…"))
             try:
-                conn, name = await connect_and_auth(self.server, self.fingerprint, self.key, "provider")
+                conn, name = await connect_and_auth(self.server, self.fingerprint, self.key, "provider",
+                                                    proxy=self.proxy)
             except AuthError as exc:
                 delay = 30
                 self.events.put(("disconnected", f"{exc}. Retrying in {delay}s."))
@@ -515,7 +516,7 @@ def main():
         root.destroy()
         return 1
 
-    net = NetClient(settings["server"], settings["fingerprint"], key)
+    net = NetClient(settings["server"], settings["fingerprint"], key, proxy=settings["proxy"])
     net.start()
     ProviderApp(root, net, root.tk.call("tk", "windowingsystem"), key, settings["peers"])
     root.deiconify()

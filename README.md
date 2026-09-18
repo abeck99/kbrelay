@@ -57,10 +57,17 @@ Treat both like SSH keys, and put a passphrase on the provider key (it prompts).
 sudo apt install python3-cryptography
 sudo useradd --system --no-create-home kbrelay
 sudo mkdir -p /opt/kbrelay && sudo cp server.py kbrelay_common.py /opt/kbrelay/
+sudo chmod -R a+rX /opt/kbrelay     # let the kbrelay service user read the code (root's umask may not)
 sudo python3 /opt/kbrelay/server.py init --dir /etc/kbrelay     # prints the fingerprint
 sudo chgrp -R kbrelay /etc/kbrelay && sudo chmod -R g+rX,o-rwx /etc/kbrelay
 sudo ufw allow 7433/tcp        # and allow 7433/tcp in any DigitalOcean Cloud Firewall
 ```
+
+(The code in `/opt/kbrelay` is world-readable, which is fine — it's not secret. The keys and
+certificate in `/etc/kbrelay` are the sensitive part, and the `chgrp`/`chmod` line above keeps
+those readable only by the `kbrelay` group. If you ever see `Permission denied` opening
+`/opt/kbrelay/server.py` in the logs, it means the service user can't read the code — rerun the
+`chmod -R a+rX /opt/kbrelay` line.)
 
 `/etc/systemd/system/kbrelay.service`:
 
@@ -123,6 +130,31 @@ Copy `id_ed25519.pub` to the server as shown above. Then create `~/.config/kbrel
 
 Passphrase-protected keys work too (the provider asks in a dialog) but need `pip install bcrypt`.
 The receiver runs unattended, so give it a key without a passphrase.
+
+The `"server"` value can be a bare IP, `host:port`, or a URL — `203.0.113.10:7433`,
+`relay.example.com:7433` and `kbrelay://203.0.113.10:7433` all work — so you can move the relay to a
+new IP or give it a DNS name later by editing this one line. The port defaults to 7433 if omitted.
+
+**Behind a proxy (e.g. a Windows work machine).** If the provider can't reach the relay directly, add
+an HTTP CONNECT proxy. It can go in the config or, if you'd rather not store the password in a file,
+in the `HTTPS_PROXY` environment variable, or on the command line with `--proxy`:
+
+```json
+{
+  "server": "203.0.113.10:7433",
+  "fingerprint": "SHA256:…",
+  "key": "~/.config/kbrelay/id_ed25519",
+  "proxy": "http://USER:PASSWORD@proxy.corp.example:8080"
+}
+```
+
+Drop the `USER:PASSWORD@` part if your proxy doesn't need credentials; include the port (many proxies
+use 8080 or 3128). The TLS to the relay still runs end to end *through* the tunnel, so the proxy — like
+the relay — sees only encrypted bytes and never your keystrokes or the relay's certificate contents.
+Two caveats: this supports **HTTP CONNECT proxies with Basic auth only**. It does **not** do SOCKS, or
+the NTLM/Kerberos ("Negotiate") auth many corporate proxies require — if yours challenges with those,
+run a small local adapter like [cntlm](http://cntlm.sourceforge.net/) or `px` and point `"proxy"` at
+`http://127.0.0.1:3128` instead. Using a proxy needs Python 3.11 or newer on the client.
 
 **The end-to-end trust folder.** Besides the key you copy *to the server*, each client keeps a local
 folder of peer `.pub` files it trusts directly (defaulting to `~/.config/kbrelay/providers` on the
@@ -240,6 +272,8 @@ receiver. It reconnects automatically and re-attaches to the receiver you last p
 ## Protocol (for writing more clients, e.g. iOS)
 
 Newline-delimited JSON over TLS 1.2+. The client pins the server certificate's SHA-256 fingerprint.
+(If a proxy is configured, the client first opens an HTTP `CONNECT` tunnel to it and then runs the
+same TLS session through that tunnel; nothing else changes.)
 
 1. client → `{"type":"hello","protocol":"kbrelay-1","role":"provider"|"receiver","pubkey":"ssh-ed25519 AAAA…"}`
 2. server → `{"type":"challenge","nonce":"<base64 32 bytes>"}`
